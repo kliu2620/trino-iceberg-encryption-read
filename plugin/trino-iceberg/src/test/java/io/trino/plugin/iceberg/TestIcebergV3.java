@@ -39,6 +39,7 @@ import org.apache.iceberg.FileFormat;
 import org.apache.iceberg.PartitionSpec;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Snapshot;
+import org.apache.iceberg.SnapshotChanges;
 import org.apache.iceberg.SortOrder;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.TableMetadata;
@@ -712,7 +713,7 @@ public class TestIcebergV3
 
         BaseTable tempTable = loadTable(temp);
         loadTable(tableName).newFastAppend()
-                .appendFile(getOnlyElement(tempTable.currentSnapshot().addedDataFiles(tempTable.io())))
+                .appendFile(getOnlyElement(SnapshotChanges.builderFor(tempTable).build().addedDataFiles()))
                 .commit();
 
         // The 'value' column is missing from the data file and has no initial-default, so it should return NULL
@@ -997,7 +998,7 @@ public class TestIcebergV3
         long totalRecords = 0;
         Long expectedLastUpdatedSequenceNumber = null;
 
-        for (DataFile file : snapshot.addedDataFiles(table.io())) {
+        for (DataFile file : SnapshotChanges.builderFor(table).build().addedDataFiles()) {
             fileCount++;
             totalRecords += file.recordCount();
 
@@ -1289,7 +1290,7 @@ public class TestIcebergV3
                 hadoopTableLocation.toString());
 
         icebergTable.newFastAppend()
-                .appendFile(getOnlyElement(tempTable.currentSnapshot().addedDataFiles(tempTable.io())))
+                .appendFile(getOnlyElement(SnapshotChanges.builderFor(tempTable).build().addedDataFiles()))
                 .commit();
 
         // Inject encryption-keys + snapshot key-id into the current metadata.json.
