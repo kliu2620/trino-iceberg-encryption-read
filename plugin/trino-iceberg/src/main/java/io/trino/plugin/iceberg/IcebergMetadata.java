@@ -185,6 +185,7 @@ import org.apache.iceberg.UpdatePartitionSpec;
 import org.apache.iceberg.UpdateProperties;
 import org.apache.iceberg.UpdateSchema;
 import org.apache.iceberg.UpdateStatistics;
+import org.apache.iceberg.encryption.PlaintextEncryptionManager;
 import org.apache.iceberg.exceptions.AlreadyExistsException;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.exceptions.CommitStateUnknownException;
@@ -718,11 +719,6 @@ public class IcebergMetadata
         TableMetadata metadata = table.operations().current();
         if (metadata.formatVersion() < 3) {
             return;
-        }
-
-        // Reject Iceberg table encryption
-        if (!metadata.encryptionKeys().isEmpty() || snapshot.keyId() != null || metadata.properties().containsKey("encryption.key-id")) {
-            throw new TrinoException(NOT_SUPPORTED, "Iceberg table encryption is not supported");
         }
     }
 
@@ -1429,6 +1425,7 @@ public class IcebergMetadata
                     throw new TrinoException(INVALID_TABLE_PROPERTY, format("The provided location '%s' does not match the existing table location '%s'", providedTableLocation.get(), icebergTable.location()));
                 }
                 validateNotModifyingOldSnapshot(table, icebergTable);
+                validateNotEncryptedForWrite(icebergTable);
                 tableLocation = icebergTable.location();
                 List<PartitionField> existingPartitionFields = getAllPartitionFields(icebergTable);
                 transaction = newCreateTableTransaction(catalog, tableMetadata, session, replace, tableLocation, allowedExtraProperties, existingPartitionFields);
@@ -1558,6 +1555,7 @@ public class IcebergMetadata
 
         validateNotModifyingOldSnapshot(table, icebergTable);
         validateTableForTrino(icebergTable, getCurrentSnapshotId(icebergTable));
+        validateNotEncryptedForWrite(icebergTable);
 
         beginTransaction(icebergTable);
 
@@ -2054,6 +2052,7 @@ public class IcebergMetadata
         BaseTable icebergTable = catalog.loadTable(session, table.getSchemaTableName());
 
         validateNotModifyingOldSnapshot(table, icebergTable);
+        validateNotEncryptedForWrite(icebergTable);
 
         verifyTableVersionForExecute(OPTIMIZE, OPTIMIZE_MAX_SUPPORTED_TABLE_VERSION, icebergTable);
 
@@ -2378,6 +2377,7 @@ public class IcebergMetadata
     {
         IcebergAddFilesHandle addFilesHandle = (IcebergAddFilesHandle) executeHandle.procedureHandle();
         Table table = catalog.loadTable(session, executeHandle.schemaTableName());
+        validateNotEncryptedForWrite(table);
         TrinoFileSystem fileSystem = fileSystemFactory.create(session.getIdentity(), table.io().properties());
         long addedDataFiles = addFiles(
                 session,
@@ -2395,6 +2395,7 @@ public class IcebergMetadata
     {
         IcebergAddFilesFromTableHandle addFilesHandle = (IcebergAddFilesFromTableHandle) executeHandle.procedureHandle();
         Table table = catalog.loadTable(session, executeHandle.schemaTableName());
+        validateNotEncryptedForWrite(table);
         TrinoFileSystem fileSystem = fileSystemFactory.create(session.getIdentity(), table.io().properties());
         long addedDataFiles = addFilesFromTable(
                 session,
@@ -3225,6 +3226,7 @@ public class IcebergMetadata
 
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
         validateNotModifyingOldSnapshot(table, icebergTable);
+        validateNotEncryptedForWrite(icebergTable);
 
         beginTransaction(icebergTable);
 
@@ -3252,6 +3254,13 @@ public class IcebergMetadata
     {
         if (table.getSnapshotId().isPresent() && (table.getSnapshotId().getAsLong() != icebergTable.currentSnapshot().snapshotId())) {
             throw new TrinoException(NOT_SUPPORTED, "Modifying old snapshot is not supported in Iceberg");
+        }
+    }
+
+    private static void validateNotEncryptedForWrite(Table table)
+    {
+        if (!(table.encryption() instanceof PlaintextEncryptionManager)) {
+            throw new TrinoException(NOT_SUPPORTED, "Writing to encrypted Iceberg tables is not supported");
         }
     }
 
@@ -3894,6 +3903,7 @@ public class IcebergMetadata
         checkState(fromSnapshotForRefresh.isEmpty(), "From Snapshot must be empty at the start of MV refresh operation.");
         IcebergTableHandle table = (IcebergTableHandle) tableHandle;
         Table icebergTable = catalog.loadTable(session, table.getSchemaTableName());
+        validateNotEncryptedForWrite(icebergTable);
         beginTransaction(icebergTable);
 
         Optional<String> dependencies = Optional.ofNullable(icebergTable.currentSnapshot())
