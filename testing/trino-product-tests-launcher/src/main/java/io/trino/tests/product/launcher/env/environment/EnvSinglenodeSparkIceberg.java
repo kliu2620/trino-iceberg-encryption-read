@@ -51,6 +51,8 @@ public class EnvSinglenodeSparkIceberg
     private static final String AWS_REGION = "us-east-1";
     private static final String AWS_ACCESS_KEY_ID = "test";
     private static final String AWS_SECRET_ACCESS_KEY = "test";
+    // Match the dep.iceberg.version in the root pom; bump together when upgrading Iceberg.
+    private static final String ICEBERG_VERSION = "1.11.0-SNAPSHOT";
 
     private final DockerFiles dockerFiles;
     private final PortBinder portBinder;

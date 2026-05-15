@@ -1,0 +1,68 @@
+name: iceberg-enc-e2e
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: iceberg-enc-postgres
+    environment:
+      POSTGRES_DB: metastore_db
+      POSTGRES_USER: hive
+      POSTGRES_PASSWORD: hive
+    ports:
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "hive", "-d", "metastore_db"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  metastore:
+    image: apache/hive:4.0.0
+    container_name: iceberg-enc-hms
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://postgres:5432/metastore_db
+        -Djavax.jdo.option.ConnectionUserName=hive
+        -Djavax.jdo.option.ConnectionPassword=hive
+        -Dmetastore.warehouse.dir=file:///Users/keyiliu/trino/iceberg-encryption-e2e/warehouse
+    ports:
+      - "9083:9083"
+    volumes:
+      # Mount host path at the same path inside container so the warehouse URI is
+      # interpretable from both sides (Spark/Trino run on the host).
+      - /Users/keyiliu/trino/iceberg-encryption-e2e/warehouse:/Users/keyiliu/trino/iceberg-encryption-e2e/warehouse
+      - ../docker/hms-jars:/extra-jars:ro
+    user: "0:0"
+    entrypoint: >
+      /bin/bash -c "
+      set -e;
+      cp /extra-jars/postgresql.jar /opt/hive/lib/postgresql.jar;
+      mkdir -p /Users/keyiliu/trino/iceberg-encryption-e2e/warehouse;
+      exec /entrypoint.sh"
+
+  localstack:
+    image: localstack/localstack:3.7
+    container_name: iceberg-enc-localstack
+    environment:
+      SERVICES: kms
+      DEBUG: 0
+      AWS_DEFAULT_REGION: us-east-1
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "curl -sf http://localhost:4566/_localstack/health | grep -E '\"kms\": *\"(running|available)\"'"
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+networks:
+  default:
+    name: iceberg-enc-net
