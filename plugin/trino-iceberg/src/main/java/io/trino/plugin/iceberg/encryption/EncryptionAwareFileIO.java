@@ -16,6 +16,7 @@ package io.trino.plugin.iceberg.encryption;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DeleteFile;
 import org.apache.iceberg.ManifestFile;
+import org.apache.iceberg.ManifestListFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
 import org.apache.iceberg.io.FileIO;
@@ -25,22 +26,20 @@ import org.apache.iceberg.io.OutputFile;
 import java.util.Map;
 
 /**
- * Wraps {@link EncryptingFileIO} to handle encrypted manifests and data files,
- * while delegating {@link #properties()} to the underlying {@link FileIO}
- * since {@link EncryptingFileIO} does not support it.
- * <p>
- * TODO: Remove after Iceberg 1.11 bump (see https://github.com/apache/iceberg/commit/473d46a)
+ * Wraps {@link EncryptingFileIO} to delegate every {@code newInputFile} variant so encrypted
+ * data files, delete files, manifests and manifest lists are decrypted transparently. In
+ * Iceberg 1.11+ {@code EncryptingFileIO.properties()} is implemented properly so we forward
+ * straight to the wrapper; the historical workaround for {@code properties()} is no longer
+ * needed.
  */
 public class EncryptionAwareFileIO
         implements FileIO
 {
-    private final FileIO delegate;
-    private final Map<String, String> properties;
+    private final EncryptingFileIO delegate;
 
     public EncryptionAwareFileIO(FileIO fileIo, EncryptionManager encryptionManager)
     {
         this.delegate = EncryptingFileIO.combine(fileIo, encryptionManager);
-        this.properties = fileIo.properties();
     }
 
     @Override
@@ -74,6 +73,12 @@ public class EncryptionAwareFileIO
     }
 
     @Override
+    public InputFile newInputFile(ManifestListFile manifestList)
+    {
+        return delegate.newInputFile(manifestList);
+    }
+
+    @Override
     public OutputFile newOutputFile(String path)
     {
         return delegate.newOutputFile(path);
@@ -88,7 +93,7 @@ public class EncryptionAwareFileIO
     @Override
     public Map<String, String> properties()
     {
-        return properties;
+        return delegate.properties();
     }
 
     @Override

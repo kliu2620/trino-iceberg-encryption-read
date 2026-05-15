@@ -13,6 +13,7 @@
  */
 package io.trino.plugin.iceberg.util;
 
+import com.google.common.collect.ImmutableList;
 import org.apache.iceberg.DataFile;
 import org.apache.iceberg.DataFiles;
 import org.apache.iceberg.DeleteFile;
@@ -53,7 +54,7 @@ public final class EncryptedFileTestUtils
      */
     public static EncryptionManager createEncryptionManager(Map<String, String> tableProperties, KeyManagementClient kmsClient)
     {
-        return EncryptionUtil.createEncryptionManager(tableProperties, kmsClient);
+        return EncryptionUtil.createEncryptionManager(ImmutableList.of(), tableProperties, kmsClient);
     }
 
     /**
@@ -63,6 +64,7 @@ public final class EncryptedFileTestUtils
     public static EncryptionManager createEncryptionManager(String keyId, KeyManagementClient kmsClient)
     {
         return EncryptionUtil.createEncryptionManager(
+                ImmutableList.of(),
                 Map.of(ENCRYPTION_TABLE_KEY, keyId),
                 kmsClient);
     }

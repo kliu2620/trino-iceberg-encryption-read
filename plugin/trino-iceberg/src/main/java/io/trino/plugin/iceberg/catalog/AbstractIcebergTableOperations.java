@@ -14,6 +14,7 @@
 package io.trino.plugin.iceberg.catalog;
 
 import dev.failsafe.Failsafe;
+import com.google.common.collect.ImmutableList;
 import dev.failsafe.RetryPolicy;
 import io.trino.annotation.NotThreadSafe;
 import io.trino.filesystem.Location;
@@ -31,8 +32,11 @@ import io.trino.spi.connector.SchemaTableName;
 import jakarta.annotation.Nullable;
 import org.apache.iceberg.TableMetadata;
 import org.apache.iceberg.TableMetadataParser;
+import org.apache.iceberg.encryption.EncryptedKey;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.encryption.EncryptionUtil;
 import org.apache.iceberg.encryption.PlaintextEncryptionManager;
+import org.apache.iceberg.encryption.StandardEncryptionManager;
 import org.apache.iceberg.exceptions.CommitFailedException;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.LocationProvider;
@@ -46,10 +50,12 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.function.Function;
 
 import static com.google.common.base.Preconditions.checkState;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static io.trino.hive.formats.HiveClassNames.FILE_INPUT_FORMAT_CLASS;
 import static io.trino.hive.formats.HiveClassNames.FILE_OUTPUT_FORMAT_CLASS;
 import static io.trino.hive.formats.HiveClassNames.LAZY_SIMPLE_SERDE_CLASS;
@@ -95,6 +101,7 @@ public abstract class AbstractIcebergTableOperations
     protected String currentMetadataLocation;
     protected boolean shouldRefresh = true;
     protected OptionalInt version = OptionalInt.empty();
+    private List<EncryptedKey> encryptionKeys = ImmutableList.of();
     private Map<String, String> encryptionProperties = Map.of();
     private EncryptionManager encryptionManager = PlaintextEncryptionManager.instance();
     private FileIO effectiveFileIo;
@@ -169,28 +176,56 @@ public abstract class AbstractIcebergTableOperations
             return;
         }
 
+        // Iceberg 1.11+: if the table is encrypted, persist any new encryption keys (e.g.
+        // a freshly generated manifest list key) emitted by StandardEncryptionManager into
+        // the metadata before it is written. Mirrors HiveTableOperations.doCommit() upstream.
+        TableMetadata metadataToCommit = withEncryptionKeys(metadata);
+
         if (isMaterializedViewStorage(tableName)) {
-            commitMaterializedViewRefresh(base, metadata);
+            commitMaterializedViewRefresh(base, metadataToCommit);
             return;
         }
 
         if (base == null) {
-            if (PROVIDER_PROPERTY_VALUE.equals(metadata.properties().get(PROVIDER_PROPERTY_KEY))) {
+            if (PROVIDER_PROPERTY_VALUE.equals(metadataToCommit.properties().get(PROVIDER_PROPERTY_KEY))) {
                 // Assume this is a table executing migrate procedure
                 version = OptionalInt.of(0);
-                currentMetadataLocation = metadata.properties().get(METADATA_LOCATION_PROP);
-                commitToExistingTable(base, metadata);
+                currentMetadataLocation = metadataToCommit.properties().get(METADATA_LOCATION_PROP);
+                commitToExistingTable(base, metadataToCommit);
             }
             else {
-                commitNewTable(metadata);
+                commitNewTable(metadataToCommit);
             }
         }
         else {
-            commitToExistingTable(base, metadata);
-            deleteRemovedMetadataFiles(io(), base, metadata);
+            commitToExistingTable(base, metadataToCommit);
+            deleteRemovedMetadataFiles(io(), base, metadataToCommit);
         }
 
         shouldRefresh = true;
+    }
+
+    private TableMetadata withEncryptionKeys(TableMetadata metadata)
+    {
+        if (!(encryptionManager instanceof StandardEncryptionManager)) {
+            return metadata;
+        }
+        Map<String, EncryptedKey> emKeys = EncryptionUtil.encryptionKeys(encryptionManager);
+        if (emKeys == null || emKeys.isEmpty()) {
+            return metadata;
+        }
+        Set<String> existing = metadata.encryptionKeys().stream()
+                .map(EncryptedKey::keyId)
+                .collect(toImmutableSet());
+        TableMetadata.Builder builder = TableMetadata.buildFrom(metadata);
+        boolean added = false;
+        for (Map.Entry<String, EncryptedKey> entry : emKeys.entrySet()) {
+            if (!existing.contains(entry.getKey())) {
+                builder.addEncryptionKey(entry.getValue());
+                added = true;
+            }
+        }
+        return added ? builder.build() : metadata;
     }
 
     protected abstract String getRefreshedLocation(boolean invalidateCaches);
@@ -336,11 +371,13 @@ public abstract class AbstractIcebergTableOperations
     private void updateEncryptionManager(TableMetadata metadata)
     {
         Map<String, String> newEncryptionProperties = metadata.properties();
-        if (encryptionProperties.equals(newEncryptionProperties)) {
+        List<EncryptedKey> newEncryptionKeys = metadata.encryptionKeys();
+        if (encryptionProperties.equals(newEncryptionProperties) && encryptionKeys.equals(newEncryptionKeys)) {
             return;
         }
         encryptionProperties = newEncryptionProperties;
-        encryptionManager = encryptionManagerFactory.create(newEncryptionProperties);
+        encryptionKeys = ImmutableList.copyOf(newEncryptionKeys);
+        encryptionManager = encryptionManagerFactory.create(newEncryptionProperties, encryptionKeys);
         if (encryptionManager instanceof PlaintextEncryptionManager) {
             effectiveFileIo = fileIo;
         }
