@@ -2,6 +2,8 @@
 
 测试镜像:`kliu2620/trino-iceberg-encryption:latest`
 sha256:`a5b5fae1be6487b3dda911b0efe5175a8d05b7a989ceebd19afd4e060ad825f4`
+**远端验收方式**:`docker pull kliu2620/trino-iceberg-encryption@sha256:a5b5fae1be6487b3dda911b0efe5175a8d05b7a989ceebd19afd4e060ad825f4` 后跑测试套,42/42 PASS。
+**JUnit 验证**:`mvn test -Dtest=TestIcebergSparkEncryptionRead -DICEBERG_ENC_E2E=1` 9/9 PASS,**含正式的 V3 puffin DV 用例**(`testReadEncryptedTableWithV3PuffinDeletionVectors`)。
 测试栈:Spark 3.5.6 + 我们 patched Iceberg 1.11.0-SNAPSHOT 写入 → Trino 482-SNAPSHOT(本镜像)读取
 KMS:LocalStack 3.7 (AWS KMS API 兼容);两把 KEK(`alias/iceberg-test`、`a907b2b9...`)。
 

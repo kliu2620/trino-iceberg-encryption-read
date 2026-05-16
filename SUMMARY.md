@@ -81,7 +81,7 @@ encryption path.
 | Suite | Passing |
 |---|---|
 | TestIcebergParquetEncryption (PR #28389's own unit tests) | 10/10 |
-| TestIcebergSparkEncryptionRead (our new e2e suite) | 8/8 |
+| TestIcebergSparkEncryptionRead (our new e2e suite, **incl. V3 puffin DV JUnit case**) | 9/9 |
 | TestIcebergEncryptionConfig | 2/2 |
 | TestKmsClientInstantiation | 2/2 |
 | TestParquetPredicates | 5/5 |
@@ -89,7 +89,14 @@ encryption path.
 | TestIcebergPageSourceProvider | 3/3 |
 | TestIcebergMergeAppend | 4/4 |
 | TestIcebergV2 (regression) | 57/57 |
-| **Total** | **96/96** |
+| **Total (`mvn test`)** | **101/101** |
+| Black-box codex 25-case suite (Spark→Trino through the published image) | **45 PASS / 0 FAIL / 4 explicit-skip** |
+
+The 4 skipped codex cases are:
+- #6 / #7 — Avro encrypted data file read (out of scope; Trino Iceberg Avro page source has no `EncryptionManager` integration; we explicitly chose not to implement it)
+- #11 / #12 — equality delete files (Spark 3.5 SQL `DELETE FROM` cannot produce them; needs Flink-style streaming writers)
+
+See [`TEST_REPORT_zh.md`](TEST_REPORT_zh.md) for the full per-case matrix and reproducibility instructions, and [`iceberg-encryption-e2e/test-artifacts/run-trino-tests.sh`](iceberg-encryption-e2e/test-artifacts/run-trino-tests.sh) for the test driver.
 
 In the running container we additionally exercised the actual V3 +
 MoR + encrypted DV path against tables produced by Spark 3.5.6:

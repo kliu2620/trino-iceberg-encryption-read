@@ -193,4 +193,52 @@ public class TestIcebergSparkEncryptionRead
         assertThat(query("SELECT count(*) FROM encrypted.\"t_cow_delete$files\" WHERE key_metadata IS NULL"))
                 .matches("VALUES BIGINT '0'");
     }
+
+    /**
+     * The headline path this project enables: encrypted V3 + merge-on-read DELETE +
+     * Puffin deletion vector. Spark 3.5.6 with our patched iceberg-spark-runtime
+     * (containing apache/iceberg#16158's fix to {@code BaseDVFileWriter}) writes a Puffin
+     * DV that has {@code key_metadata} set on the manifest entry. Trino reads the
+     * AGS1-encrypted Puffin file via the encryption manager built from that
+     * {@code key_metadata} blob.
+     *
+     * Without either of:
+     *   1. PR #16158 (write side): manifest's {@code key_metadata} would be NULL and the
+     *      DV would be unreadable forever
+     *   2. our Trino-side patch (read side): the connector would either bail with
+     *      "Reading encrypted non-Parquet file is not supported" or silently treat the
+     *      AGS1-wrapped Puffin as plaintext and explode on the Puffin magic check
+     * the table {@code encrypted.t_dv_real_v2} cannot be selected from at all.
+     */
+    @Test
+    public void testReadEncryptedTableWithV3PuffinDeletionVectors()
+    {
+        // 100 rows inserted, 6 rows deleted via SparkSQL DELETE FROM with V3
+        // write.delete.mode=merge-on-read -> Puffin DV produced.
+        assertThat(query("SELECT count(*) FROM encrypted.t_dv_real_v2"))
+                .matches("VALUES BIGINT '94'");
+
+        // The deleted rows must be gone (DV correctly applied per data file).
+        assertThat(query("SELECT count(*) FROM encrypted.t_dv_real_v2 WHERE id IN (3, 7, 9, 12, 18, 24)"))
+                .matches("VALUES BIGINT '0'");
+
+        // Partition pruning + DV decryption combine cleanly: in country='B' (odd ids),
+        // ids < 20 minus deleted {3, 7, 9} -> {1, 5, 11, 13, 15, 17, 19}.
+        assertThat(query("SELECT id FROM encrypted.t_dv_real_v2 WHERE country = 'B' AND id < 20 ORDER BY id"))
+                .matches("VALUES INTEGER '1', INTEGER '5', INTEGER '11', INTEGER '13', INTEGER '15', INTEGER '17', INTEGER '19'");
+
+        // Range aggregate exercises decryption across all surviving data files.
+        assertThat(query("SELECT min(id), max(id), count(*) FROM encrypted.t_dv_real_v2"))
+                .matches("VALUES (INTEGER '0', INTEGER '99', BIGINT '94')");
+
+        // Every Puffin DV manifest entry must carry encryption key_metadata; this
+        // is exactly what apache/iceberg#16158 fixes on the write side, and what
+        // our Trino read path consumes (DeleteFile.keyMetadata).
+        assertThat(query("SELECT count(*) FROM encrypted.\"t_dv_real_v2$files\" WHERE content = 2 AND key_metadata IS NULL"))
+                .matches("VALUES BIGINT '0'");
+
+        // And every data file must still be encrypted too.
+        assertThat(query("SELECT count(*) FROM encrypted.\"t_dv_real_v2$files\" WHERE content = 0 AND key_metadata IS NULL"))
+                .matches("VALUES BIGINT '0'");
+    }
 }
