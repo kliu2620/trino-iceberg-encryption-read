@@ -7,6 +7,7 @@ ROOT="$(cd "$HERE/.." && pwd)"
 SPARK_HOME="${SPARK_HOME:-$HOME/spark/spark-3.5.6-bin-hadoop3}"
 M2="${M2:-$HOME/.m2/repository}"
 KEY_ID="$(cat "$ROOT/.kms-key-id")"
+KEY_ID_B="$(cat /tmp/iceberg-enc-work/.kms-key-id-b 2>/dev/null || echo "$KEY_ID")"
 
 export JAVA_HOME="/Library/Java/JavaVirtualMachines/zulu-17.jdk/Contents/Home"
 export PATH="$JAVA_HOME/bin:$PATH"
@@ -35,4 +36,5 @@ exec "$SPARK_HOME/bin/spark-sql" \
   --conf "spark.sql.catalog.iceberg.warehouse=file:///Users/keyiliu/trino/iceberg-encryption-e2e/warehouse" \
   --conf "spark.driver.extraJavaOptions=-Daws.region=us-east-1" \
   -f "$HERE/write-encrypted.sql" \
-  --hivevar key_id="$KEY_ID"
+  --hivevar key_id="$KEY_ID" \
+  --hivevar key_id_b="$KEY_ID_B"
