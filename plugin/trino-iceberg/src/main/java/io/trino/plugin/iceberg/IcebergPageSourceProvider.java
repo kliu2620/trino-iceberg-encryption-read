@@ -21,6 +21,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import io.trino.filesystem.Location;
 import io.trino.filesystem.TrinoFileSystem;
 import io.trino.filesystem.TrinoInput;
@@ -102,8 +103,12 @@ import org.apache.iceberg.PartitionSpecParser;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.SchemaParser;
 import org.apache.iceberg.avro.AvroSchemaUtil;
+import org.apache.iceberg.encryption.EncryptedFiles;
+import org.apache.iceberg.encryption.EncryptedInputFile;
 import org.apache.iceberg.encryption.EncryptingFileIO;
 import org.apache.iceberg.encryption.EncryptionManager;
+import org.apache.iceberg.io.InputFile;
+import org.apache.iceberg.io.SeekableInputStream;
 import org.apache.iceberg.io.FileIO;
 import org.apache.iceberg.io.InputFile;
 import org.apache.iceberg.mapping.MappedField;
@@ -317,7 +322,8 @@ public class IcebergPageSourceProvider
                 split.dataSequenceNumber(),
                 split.fileFirstRowId(),
                 tableHandle.getNameMappingJson().map(NameMappingParser::fromJson),
-                split.parquetFileDecryptionData());
+                split.parquetFileDecryptionData(),
+                tableHandle.getStorageProperties());
     }
 
     public ConnectorPageSource createPageSource(
@@ -340,7 +346,8 @@ public class IcebergPageSourceProvider
             long dataSequenceNumber,
             OptionalLong fileFirstRowId,
             Optional<NameMapping> nameMapping,
-            Optional<ParquetFileDecryptionData> parquetFileDecryptionData)
+            Optional<ParquetFileDecryptionData> parquetFileDecryptionData,
+            Map<String, String> tableProperties)
     {
         Map<Integer, Optional<String>> partitionKeys = getPartitionKeys(partitionData, partitionSpec);
         TupleDomain<IcebergColumnHandle> effectivePredicate = getUnenforcedPredicate(
@@ -405,6 +412,11 @@ public class IcebergPageSourceProvider
 
         // filter out deleted rows
         if (!deletes.isEmpty()) {
+            // Lazily build an EncryptionManager only if some delete file actually carries
+            // key_metadata (i.e. encrypted V3 puffin DV). We don't want to require KMS access
+            // on plaintext tables.
+            Supplier<EncryptionManager> encryptionManagerSupplier = memoize(() ->
+                    encryptionManagerFactory.create(tableProperties));
             Supplier<Optional<RowPredicate>> deletePredicate = memoize(() -> getDeleteManager(partitionSpec, partitionData)
                     .getDeletePredicate(
                             path,
@@ -414,7 +426,10 @@ public class IcebergPageSourceProvider
                             tableSchema,
                             readerPageSourceWithRowPositions.startRowPosition(),
                             readerPageSourceWithRowPositions.endRowPosition(),
-                            deleteFile -> readDeletionVector(fileSystem, deleteFile),
+                            deleteFile -> readDeletionVector(fileSystem, deleteFile,
+                                    deleteFile.keyMetadata().isPresent()
+                                            ? encryptionManagerSupplier.get()
+                                            : org.apache.iceberg.encryption.PlaintextEncryptionManager.instance()),
                             (deleteFile, deleteColumns, tupleDomain) -> openDeleteFile(session, fileSystem, deleteFile, deleteColumns, tupleDomain)));
             pageSource = TransformConnectorPageSource.create(pageSource, page -> {
                 try {
@@ -529,16 +544,62 @@ public class IcebergPageSourceProvider
         return requiredColumns.build();
     }
 
-    private static DeletionVector readDeletionVector(TrinoFileSystem fileSystem, DeleteFile delete)
+    private static DeletionVector readDeletionVector(TrinoFileSystem fileSystem, DeleteFile delete, EncryptionManager encryptionManager)
     {
         verify(delete.isDeletionVector(), "Not a deletion vector: %s", delete);
-        TrinoInputFile trinoInputFile = fileSystem.newInputFile(Location.of(delete.path()), delete.fileSizeInBytes());
-        try (TrinoInput trinoInput = trinoInputFile.newInput()) {
-            Slice slice = trinoInput.readFully(delete.contentOffset().orElseThrow(), toIntExact(delete.contentSizeInBytes().orElseThrow()));
+        long offset = delete.contentOffset().orElseThrow();
+        int size = toIntExact(delete.contentSizeInBytes().orElseThrow());
+        try {
+            Slice slice;
+            if (delete.keyMetadata().isPresent()) {
+                slice = readDecryptedDeletionVector(fileSystem, delete, offset, size, encryptionManager);
+            }
+            else {
+                TrinoInputFile trinoInputFile = fileSystem.newInputFile(Location.of(delete.path()), delete.fileSizeInBytes());
+                try (TrinoInput trinoInput = trinoInputFile.newInput()) {
+                    slice = trinoInput.readFully(offset, size);
+                }
+            }
             return DeletionVector.builder().deserialize(slice).build().orElseThrow();
         }
         catch (IOException e) {
             throw new TrinoException(ICEBERG_CANNOT_OPEN_SPLIT, "Failed to read deletion vector file: " + delete.path(), e);
+        }
+    }
+
+    /**
+     * Reads an encrypted Iceberg V3 puffin deletion vector file. The whole puffin is wrapped
+     * with AES-GCM-Stream encryption and Trino does not currently route DV reads through
+     * Iceberg's EncryptingFileIO, so we apply the standard-encryption AES-GCM-Stream
+     * decryption explicitly using the per-file key + AAD prefix that Iceberg packs into
+     * the manifest's key_metadata column.
+     */
+    private static Slice readDecryptedDeletionVector(
+            TrinoFileSystem fileSystem,
+            DeleteFile delete,
+            long offset,
+            int size,
+            EncryptionManager encryptionManager)
+            throws IOException
+    {
+        ByteBuffer keyMetadataBuffer = ByteBuffer.wrap(delete.keyMetadata().orElseThrow());
+        TrinoInputFile cipherFile = fileSystem.newInputFile(Location.of(delete.path()));
+        EncryptedInputFile encryptedInputFile = EncryptedFiles.encryptedInput(
+                new ForwardingInputFile(cipherFile),
+                keyMetadataBuffer);
+        InputFile decrypted = encryptionManager.decrypt(encryptedInputFile);
+        try (SeekableInputStream stream = decrypted.newStream()) {
+            stream.seek(offset);
+            byte[] dvBytes = new byte[size];
+            int read = 0;
+            while (read < size) {
+                int chunk = stream.read(dvBytes, read, size - read);
+                if (chunk < 0) {
+                    throw new IOException("Unexpected EOF reading DV bytes from " + delete.path());
+                }
+                read += chunk;
+            }
+            return Slices.wrappedBuffer(dvBytes);
         }
     }
 

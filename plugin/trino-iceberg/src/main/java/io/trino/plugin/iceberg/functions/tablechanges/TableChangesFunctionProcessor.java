@@ -14,6 +14,7 @@
 package io.trino.plugin.iceberg.functions.tablechanges;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import io.trino.plugin.iceberg.IcebergColumnHandle;
 import io.trino.plugin.iceberg.IcebergPageSourceProvider;
 import io.trino.plugin.iceberg.PartitionData;
@@ -138,7 +139,9 @@ public class TableChangesFunctionProcessor
                 0,
                 OptionalLong.empty(),
                 functionHandle.nameMappingJson().map(NameMappingParser::fromJson),
-                split.parquetFileDecryptionData());
+                split.parquetFileDecryptionData(),
+                // No deletes in table_changes function, so encryption manager isn't needed.
+                ImmutableMap.of());
         this.delegateColumnMap = delegateColumnMap;
 
         this.changeTypeIndex = changeTypeIndex;

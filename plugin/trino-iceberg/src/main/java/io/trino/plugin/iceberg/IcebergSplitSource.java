@@ -666,6 +666,13 @@ public class IcebergSplitSource
             return Optional.empty();
         }
 
+        if (fileFormat == FileFormat.PUFFIN) {
+            // Puffin (V3 deletion vector) decryption is handled transparently by the wrapping
+            // EncryptingFileIO based on DeleteFile.keyMetadata(); no Parquet-level decryption
+            // properties are needed and the data isn't Parquet to begin with.
+            return Optional.empty();
+        }
+
         if (fileFormat != PARQUET) {
             throw new TrinoException(NOT_SUPPORTED, "Reading encrypted non-Parquet file is not supported: " + location);
         }

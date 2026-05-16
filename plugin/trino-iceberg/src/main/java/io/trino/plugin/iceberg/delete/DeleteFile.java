@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 
 import static com.google.common.base.MoreObjects.toStringHelper;
+import static io.airlift.slice.SizeOf.SIZE_OF_BYTE;
 import static io.airlift.slice.SizeOf.SIZE_OF_INT;
 import static io.airlift.slice.SizeOf.estimatedSizeOf;
 import static io.airlift.slice.SizeOf.instanceSize;
@@ -46,7 +47,14 @@ public record DeleteFile(
         long dataSequenceNumber,
         OptionalLong contentOffset,
         Optional<Integer> contentSizeInBytes,
-        Optional<ParquetFileDecryptionData> parquetFileDecryptionData)
+        Optional<ParquetFileDecryptionData> parquetFileDecryptionData,
+        // Iceberg StandardKeyMetadata buffer carried verbatim from the manifest. Non-null
+        // for any encrypted delete file (parquet position/equality deletes or V3 puffin DVs).
+        // For parquet deletes we surface the parsed key + AAD prefix via parquetFileDecryptionData
+        // separately; for puffin DVs we need the raw blob (and the file length packed inside it)
+        // to run AES-GCM-Stream decryption ourselves in IcebergPageSourceProvider#readDeletionVector
+        // because Trino does not route DV reads through Iceberg's EncryptingFileIO.
+        Optional<byte[]> keyMetadata)
 {
     private static final long INSTANCE_SIZE = instanceSize(DeleteFile.class);
 
@@ -69,6 +77,14 @@ public record DeleteFile(
         OptionalLong contentOffset = deleteFile.contentOffset() == null ? OptionalLong.empty() : OptionalLong.of(deleteFile.contentOffset());
         Optional<Integer> contentSizeInBytes = Optional.ofNullable(deleteFile.contentSizeInBytes()).map(Math::toIntExact);
 
+        Optional<byte[]> keyMetadata = Optional.ofNullable(deleteFile.keyMetadata())
+                .map(buf -> {
+                    ByteBuffer dup = buf.duplicate();
+                    byte[] bytes = new byte[dup.remaining()];
+                    dup.get(bytes);
+                    return bytes;
+                });
+
         return new DeleteFile(
                 deleteFile.content(),
                 deleteFile.location(),
@@ -81,7 +97,8 @@ public record DeleteFile(
                 deleteFile.dataSequenceNumber(),
                 contentOffset,
                 contentSizeInBytes,
-                parquetFileDecryptionData);
+                parquetFileDecryptionData,
+                keyMetadata);
     }
 
     public DeleteFile
@@ -95,6 +112,7 @@ public record DeleteFile(
         requireNonNull(contentOffset, "contentOffset is null");
         requireNonNull(contentSizeInBytes, "contentSizeInBytes is null");
         requireNonNull(parquetFileDecryptionData, "parquetFileDecryptionData is null");
+        requireNonNull(keyMetadata, "keyMetadata is null");
     }
 
     public boolean isDeletionVector()
@@ -110,7 +128,8 @@ public record DeleteFile(
         return INSTANCE_SIZE
                 + estimatedSizeOf(path)
                 + estimatedSizeOf(equalityFieldIds, _ -> SIZE_OF_INT)
-                + sizeOf(parquetFileDecryptionData, ParquetFileDecryptionData::getRetainedSizeInBytes);
+                + sizeOf(parquetFileDecryptionData, ParquetFileDecryptionData::getRetainedSizeInBytes)
+                + sizeOf(keyMetadata, bytes -> (long) SIZE_OF_BYTE * bytes.length);
     }
 
     @Override

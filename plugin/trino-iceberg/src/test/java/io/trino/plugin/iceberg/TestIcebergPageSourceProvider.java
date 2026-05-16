@@ -113,6 +113,7 @@ class TestIcebergPageSourceProvider
                 1L, // dataSequenceNumber
                 OptionalLong.empty(),
                 Optional.empty(),
+                Optional.empty(),
                 Optional.empty());
 
         IcebergPageSourceProvider provider = createPageSourceProvider();
@@ -150,7 +151,8 @@ class TestIcebergPageSourceProvider
                 0L, // dataSequenceNumber
                 OptionalLong.empty(),
                 Optional.empty(),
-                Optional.empty())) {
+                Optional.empty(),
+                ImmutableMap.of())) {
             // Memory should still be 0 before reading any pages (lazy loading)
             assertThat(provider.getMemoryUsage()).isEqualTo(0);
 
