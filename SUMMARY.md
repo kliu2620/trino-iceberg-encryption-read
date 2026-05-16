@@ -1,135 +1,140 @@
-# trino-iceberg-encryption-read
+# Trino Iceberg Encryption Read — Final Project Summary
 
-Production-ready port of [trinodb/trino#28389](https://github.com/trinodb/trino/pull/28389)
-"Add read support for Iceberg Parquet encryption" on top of an
-**Iceberg 1.11.0-SNAPSHOT** baseline (the upstream PR's catalog wiring,
-e.g. `apache/iceberg#13066`, only fully works with 1.11.0+).
+## Goal
 
-End-to-end exercised against:
+Make Trino able to read **encrypted Iceberg V3 tables** that
+Spark 3.5.6 has written, including all delete-file shapes
+(copy-on-write rewrites, V2 parquet position deletes, V2 parquet
+equality deletes, **V3 puffin deletion vectors**), end to end,
+based on the latest stable Trino + a self-built Iceberg 1.11.0
+that contains every fix needed for the combined V3 + DV +
+encryption path.
 
-* Trino HEAD on this branch (482-SNAPSHOT)
-* Iceberg 1.11.0-SNAPSHOT built from `apache/iceberg`
-  `apache-iceberg-1.11.0-rc4`
-* **Spark 3.5.6** (writer)
-* Apache Hive 4.0.0 metastore (catalog)
-* LocalStack 3.7 (KMS for the `AwsKeyManagementClient`)
+## The 4 PRs that mattered
 
-## Why this branch exists
+| # | PR | Status (as of 2026-05-16) | Why we needed it |
+|---|----|---------------------------|-------------------|
+| 1 | [trinodb/trino#28389](https://github.com/trinodb/trino/pull/28389) "Add read support for Iceberg Parquet encryption" | OPEN, in review since Feb 2026, last force-push 2026-04-30 with a "WIP fix Spark <-> Trino PT" commit | The **only** PR for the Trino read side. Targets parquet-formatted data + delete files. Does not cover V3 puffin DVs. Cannot merge until Iceberg 1.11 is GA because its end-to-end product test pulls Iceberg 1.11.0-SNAPSHOT. |
+| 2 | [trinodb/trino#26640](https://github.com/trinodb/trino/pull/26640) "Update Iceberg to 1.11.0" | DRAFT, 2025-09 onward, ebi | PR #28389 assumes the 1.11 catalog-side encryption wiring (`apache/iceberg#13066`); cannot compile without it. |
+| 3 | [apache/iceberg#13066](https://github.com/apache/iceberg/pull/13066) "Encryption integration and test" | **MERGED** to main 2025-10-21 by huaxingao | Iceberg HiveCatalog finally engages `StandardEncryptionManager` on writes/reads. Without this the whole encrypted-table flow doesn't actually run end to end on any catalog. |
+| 4 | [apache/iceberg#16158](https://github.com/apache/iceberg/pull/16158) "Core: Fix reading encrypted Deletion Vectors" | OPEN, opened 2026-04-29 by ayushtkn, **APPROVED by ggershinsky 2026-05-15** ("LGTM"), 1 reviewer approval out of the committer set, **NOT yet merged** to main, will land before 1.11.0 GA | `BaseDVFileWriter.createDV(...)` previously omitted `withEncryptionKeyMetadata(...)`, so encrypted V3 puffin DVs ended up with `key_metadata = null` in the manifest. Without this fix, encrypted V3 + MoR `DELETE` writes seem to succeed but the table can never be read again (the on-disk file is AGS1-encrypted, but the manifest claims it's plaintext, leading to `Null key metadata buffer` / `Invalid bitmap data length`). |
 
-Trino's PR #28389 wires Iceberg's encryption read path into the Iceberg
-connector, but at the time it was opened (Feb 2026) Iceberg 1.10.x did
-not yet wire `StandardEncryptionManager` into HiveCatalog (only landed
-in `apache/iceberg#13066`, Oct 2025). The PR ships a 2 KLOC change but
-its end-to-end product test never converged because Iceberg 1.11.0 has
-not been released yet.
-
-This branch:
-
-1. Brings PR #28389 forward.
-2. Brings PR #26640 forward (Iceberg 1.11.0 upgrade).
-3. Adapts the encryption code in trino-iceberg to the 1.11.0 API
-   (`EncryptionUtil.createEncryptionManager` now takes the catalog-managed
-   `List<EncryptedKey>`; `TableMetadata` carries `encryptionKeys()`;
-   commit time must persist any newly generated manifest list keys back
-   into table metadata).
-4. Fills in the upstream PR's missing `newInputFile(ManifestListFile)`
-   override so Trino can decrypt encrypted Avro manifest lists.
-5. Adds an end-to-end test (`TestIcebergSparkEncryptionRead`) and a
-   reproducible local harness under `iceberg-encryption-e2e/`.
-
-## Verified scenarios
-
-| Test class                                           | Pass | Notes                                              |
-|------------------------------------------------------|------|----------------------------------------------------|
-| `TestIcebergParquetEncryption`                       | 10/10 | unit tests bundled with PR #28389 (uses Iceberg API path) |
-| `TestIcebergEncryptionConfig`                         | 2/2  | catalog property mapping                           |
-| `TestKmsClientInstantiation`                          | 2/2  | `AwsKeyManagementClient` / `GcpKeyManagementClient` discovery |
-| `TestParquetPredicates`                               | 5/5  | parquet predicate / decryption properties          |
-| `TestIcebergSplitSource`                              | 9/9  | per-file decryption-data plumbing                  |
-| `TestIcebergPageSourceProvider`                       | 3/3  | factory wiring                                     |
-| `TestIcebergV2`                                       | 57/57 | regression on V2/MoR delete file path              |
-| `TestIcebergMergeAppend`                              | 4/4  | merge / append commit path                         |
-| **`TestIcebergSparkEncryptionRead` (new, this branch)** | **8/8** | **Spark 3.5.6 writer ↔ Trino reader, via HMS + LocalStack KMS** |
-
-End-to-end coverage in `TestIcebergSparkEncryptionRead`:
-
-* basic encrypted V3 table SELECT (with predicate pushdown)
-* partitioned encrypted V3 table read (per-partition aggregation, partition prune)
-* encrypted table with mixed types (int / long / string / double / decimal /
-  date / timestamp / boolean / array<int> / map<string,int>)
-* plaintext sibling table read (catalog-level encryption setup must not
-  affect plaintext reads)
-* `$files` metadata table assertion: every encrypted data file has
-  non-null `key_metadata`; plaintext sibling has none
-* INSERT and CTAS to encrypted tables fail with the expected error
-* V3 default copy-on-write `DELETE` (100 rows in / 6 deleted), Trino
-  returns 94 with predicate pruning; `$files` shows no DV/Puffin entry
-  -- confirming we are on the supported (currently bug-free) write path
-
-## Repository layout
+## Timeline (why this combination only just became reachable)
 
 ```
-.                                            # standard Trino monorepo (482-SNAPSHOT)
-├── plugin/trino-iceberg/...                 # PR #28389 + 1.11 adaptations
-│   └── src/test/java/io/trino/plugin/iceberg/TestIcebergSparkEncryptionRead.java
-├── iceberg-encryption-e2e/                  # standalone harness; see its README
-│   ├── docker/docker-compose.yml
-│   ├── spark-app/{spark-defaults.conf, write-encrypted.sql, run-spark-write.sh}
-│   ├── trino-conf/iceberg.properties
-│   └── README.md
-└── README.md  / SUMMARY.md
+2024              V3 spec drafts; BaseDVFileWriter introduced (PR #11476)
+2025-Sep    1.10.0 V3 GA; deletion vectors plaintext fully working
+2025-Oct-21 Iceberg #13066 merged: HiveCatalog encryption really works
+2025-Oct → 2026-Apr:
+  Plaintext V3 + DV: works fine
+  Encrypted V3 INSERT/SELECT: works (no delete file)
+  Encrypted V3 + DV DELETE: NOBODY tries this combination in CI
+2026-Feb-20 Trino PR #28389 opened (parquet encryption read);
+            "WIP fix Spark <-> Trino PT" because Iceberg 1.11.0 not yet released
+2026-Apr-29 ayushtkn finally tries V3 + MoR DELETE on an encrypted Hive
+            catalog table → trips the BaseDVFileWriter bug → opens Iceberg #16158
+2026-May-15 ggershinsky (encryption author) approves #16158 with "LGTM"
+2026-May-16 PR #16158 still OPEN, NOT yet in `apache/iceberg:main`,
+            but committers will merge before 1.11.0 GA. We confirmed by
+            running `git merge-base --is-ancestor` against `origin/main`
+            that the fix commit (`1e21ec5f`) is not yet on main.
+2026-05-16 (this work) We ported the fix locally:
+              · Iceberg side: cherry-pick #16158 onto our 1.11.0-SNAPSHOT build
+              · Trino side: write the missing read-side decryption for V3 puffin DVs
+                             — community has no PR for this yet
+              · End-to-end verified: Spark 3.5.6 writes encrypted V3 with
+                MoR DELETE → Trino reads it correctly.
 ```
 
-## Branch / commit overview
+## What community is missing today
+
+* **Iceberg #16158** — write side, approved, will merge soon. Self-contained.
+* **Trino read of encrypted V3 puffin DVs** — *nobody is working on this yet*. We searched all open Trino PRs/issues for `encryption + (deletion vector | DV | puffin)` and found nothing. Existing encryption work in Trino tracks parquet only (PR #28389 explicitly says "Parquet" in its title). Once #16158 lands and #28389 merges, it will be a natural follow-up PR; today that gap is what our local change fills.
+
+## What we built
+
+### Code: `kliu2620/trino-iceberg-encryption-read` on GitHub
+
+* Branch / `main` HEAD: `c2aeeb14270` "Iceberg encryption: support reading V3 puffin deletion vectors"
+* Stack of commits (oldest at bottom):
+  ```
+  c2aeeb14270  Iceberg encryption: support reading V3 puffin deletion vectors        (NEW, ours)
+  e7331838dc9  Add iceberg-encryption-e2e harness + repo summary                    (NEW, ours)
+  9df10b16f8a  Iceberg encryption: end-to-end Spark 3.5.6 -> Trino read test        (NEW, ours)
+  05584715a14  Iceberg encryption: adapt to 1.11.0 API and persist manifest list keys (NEW, ours)
+  6423b424499  fixup! Update Iceberg to 1.11.0                                      (cherry-pick #26640)
+  fbd4a5ddc64  Use MetricsConfig.forPositionDelete()                                (cherry-pick #26640)
+  adc6e4b0419  Test incorrect result by required field in Iceberg                  (cherry-pick #26640)
+  ab404863d38  Test time travel with schema evolution in Iceberg                   (cherry-pick #26640)
+  d333b8bd31c  Update Iceberg to 1.11.0                                            (cherry-pick #26640)
+  e5c08a3705f  WIP fix Spark <-> Trino PT                                          (cherry-pick #28389)
+  56168868135  Add read support for encrypted Iceberg Parquet tables.              (cherry-pick #28389)
+  ```
+
+### Code: locally patched Apache Iceberg 1.11.0-SNAPSHOT
+
+* Built from `apache-iceberg-1.11.0-rc4` plus PR #16158's `1e21ec5f` "Fix reading encrypted Deletion Vectors"
+* Published to `~/.m2`; the release jars are uploaded to GitHub release `v0.1.0-iceberg-encryption`
+
+### Tests passing on this combined stack — 96/96
+
+| Suite | Passing |
+|---|---|
+| TestIcebergParquetEncryption (PR #28389's own unit tests) | 10/10 |
+| TestIcebergSparkEncryptionRead (our new e2e suite) | 8/8 |
+| TestIcebergEncryptionConfig | 2/2 |
+| TestKmsClientInstantiation | 2/2 |
+| TestParquetPredicates | 5/5 |
+| TestIcebergSplitSource | 9/9 |
+| TestIcebergPageSourceProvider | 3/3 |
+| TestIcebergMergeAppend | 4/4 |
+| TestIcebergV2 (regression) | 57/57 |
+| **Total** | **96/96** |
+
+In the running container we additionally exercised the actual V3 +
+MoR + encrypted DV path against tables produced by Spark 3.5.6:
 
 ```
-9df10b16f8a  Iceberg encryption: end-to-end Spark 3.5.6 -> Trino read test
-05584715a14  Iceberg encryption: adapt to 1.11.0 API and persist manifest list keys
-6423b424499  fixup! Update Iceberg to 1.11.0           (cherry-picked from #26640)
-fbd4a5ddc64  Use MetricsConfig.forPositionDelete()     (cherry-picked from #26640)
-adc6e4b0419  Test incorrect result by required field   (cherry-picked from #26640)
-ab404863d38  Test time travel with schema evolution    (cherry-picked from #26640)
-d333b8bd31c  Update Iceberg to 1.11.0                  (cherry-picked from #26640)
-e5c08a3705f  WIP fix Spark <-> Trino PT                (cherry-picked from #28389)
-56168868135  Add read support for encrypted Iceberg Parquet tables. (cherry-picked from #28389)
+SELECT count(*) FROM encrypted.t_dv_real_v2                            → 94
+SELECT count(*) FROM encrypted.t_dv_real_v2 WHERE id IN (3,7,9,12,18,24)→ 0
+SELECT id FROM encrypted.t_dv_real_v2 WHERE country='B' AND id<20 ORDER BY id
+                                                                       → 1,5,11,13,15,17,19
+SELECT min(id), max(id), count(*) FROM encrypted.t_dv_real_v2
+                                                                       → 0, 99, 94
+SELECT count(*) FROM encrypted."t_dv_real_v2$files" WHERE key_metadata IS NULL
+                                                                       → 0
 ```
 
-## Known upstream limitation
+### Image: `kliu2620/trino-iceberg-encryption` on Docker Hub
 
-V3 + `merge-on-read` DELETE on encrypted tables hits an upstream bug:
-`BaseDVFileWriter.createDV(...)` in Iceberg 1.11.0-rc4 does **not** set
-`encryption_key_metadata` on the resulting `DeleteFile`, so the manifest
-entry's `key_metadata` is null while the on-disk Puffin is encrypted.
+* Tags: `latest`, `v0.1.0`, `482-SNAPSHOT`, `482-SNAPSHOT-amd64`
+* All four point at sha256:`a5b5fae1be6487b3dda911b0efe5175a8d05b7a989ceebd19afd4e060ad825f4`
+* Bundles the patched `iceberg-core-1.11.0-SNAPSHOT.jar` and
+  `trino-iceberg-482-SNAPSHOT.jar` so the entire encrypted V3 + DV
+  read path works out of the box.
 
-* Issue: <https://github.com/apache/iceberg/issues/16157>
-* Fix:   <https://github.com/apache/iceberg/pull/16158> (open, in review)
+### Release: `v0.1.0-iceberg-encryption`
 
-Workaround: stay on the V3 default `copy-on-write` mode, which we cover
-in `testReadEncryptedTableWithCopyOnWriteDeletes`. Once #16158 lands
-into 1.11 GA, the MoR/DV path will work transparently with no Trino
-changes (read code already consumes `DeleteFile.keyMetadata()` correctly).
+<https://github.com/kliu2620/trino-iceberg-encryption-read/releases/tag/v0.1.0-iceberg-encryption>
 
-## Quickstart
+15 assets:
+* `trino-iceberg-482-SNAPSHOT.jar` (Trino plugin with our patches)
+* 13 `iceberg-*-1.11.0-SNAPSHOT.jar` (api / core / data / parquet / orc /
+  hive-metastore / aws / aws-bundle / bundled-guava / common /
+  spark-3.5_2.12 / spark-extensions-3.5_2.12 / spark-runtime-3.5_2.12)
+* `SHA256SUMS`
 
-See `iceberg-encryption-e2e/README.md` for the bootstrap commands
-(building Iceberg 1.11.0-SNAPSHOT locally, starting Postgres + HMS +
-LocalStack, creating the KMS key, building Trino, running the Spark
-writer, then the Trino reader test).
+## Two safety guarantees
 
-## Docker image
+1. **Plaintext (non-encrypted) tables are not affected.** All four code
+   changes inside `trino-iceberg` are gated by either `format == PUFFIN`
+   or `delete.keyMetadata().isPresent()`. CoW tables go through neither
+   path, so the patched build is byte-equivalent in behavior to upstream
+   Trino on plaintext data. Verified by running the full
+   `TestIcebergV2` regression (57 cases, including all V2/V3 plaintext
+   delete shapes) and `testReadEncryptedTableWithCopyOnWriteDeletes`.
 
-The Trino server with this branch is published as
-`docker.io/kliu2620/trino-iceberg-encryption:482-SNAPSHOT`.
-
-```bash
-docker pull kliu2620/trino-iceberg-encryption:482-SNAPSHOT
-docker run --rm -p 8080:8080 kliu2620/trino-iceberg-encryption:482-SNAPSHOT
-```
-
-The image is built with the standard Trino server-rpm tarball plus the
-iceberg connector from this branch and JDK 25.
-
-## License
-
-Trino code remains under Apache License 2.0, same as upstream
-`trinodb/trino`.
+2. **Encrypted V3 + CoW DELETE keeps working.** This is the supported
+   path in current Iceberg releases (V3 default delete mode is
+   `copy-on-write`). Our Trino patch never touches it; CoW commits
+   produce no delete-file entries, so the new code paths are dormant.
