@@ -1,0 +1,49 @@
+DEBUG: t_basic snapshots: first=6456256261057366934 last=84470859018537753
+===============================
+ Trino encryption-read e2e
+===============================
+PASS  #01  Parquet basic encrypted read
+PASS  #02a  Parquet types: int/long/string/double
+PASS  #02b  Parquet types: float/decimal/binary
+PASS  #02c  Parquet types: date/timestamp/boolean
+PASS  #02d  Parquet types: array/map
+PASS  #03  NULL values
+PASS  #03b  NULL values count(amount)
+PASS  #04  Empty encrypted table
+PASS  #04b  Empty encrypted table star query
+PASS  #05  Big file multi row group
+PASS  #05b  Big file aggregate
+PASS  #05c  Big file predicate
+PASS  #08  Multiple manifests across appends
+PASS  #09  Multiple snapshots, all readable
+PASS  #09b  Each snapshot has parents in chain
+PASS  #10a  V3 Puffin DV: count after MoR delete
+PASS  #10b  V3 Puffin DV: deleted rows are gone
+PASS  #10c  V3 Puffin DV: surviving rows correct
+PASS  #10d  V3 Puffin DV: aggregate min/max
+PASS  #10e  V3 Puffin DV: delete-file metadata is encrypted (key_metadata not null)
+PASS  #10f  CoW delete encrypted table
+PASS  #10g  CoW: no delete files
+PASS  #13  Single KEK table read
+PASS  #15a  Multiple KEK tables in same trino
+PASS  #15b  Cross-KEK union read
+PASS  #18a  Partition pruning
+PASS  #18b  Partition group-by counts
+PASS  #19a  Partition evolution: total count
+PASS  #19b  Partition evolution: country=US covers both old and new partitions
+PASS  #20a  Add column: total rows after evolution
+PASS  #20b  Add column: old rows have NULL in new column
+PASS  #20c  Add column: new rows have values
+PASS  #21  Drop column
+PASS  #21b  Drop column: dropped column not in schema
+PASS  #22a  Time travel: read original snapshot of t_basic (5 rows)
+PASS  #22b  Time travel: read latest snapshot (7 rows)
+PASS  #23a  Wide table: project 2 of 20 columns
+PASS  #23b  Wide table: project 5 columns
+PASS  #24a  Predicate pushdown: id=3
+PASS  #24b  Predicate pushdown: amount>350
+PASS  #P1  Plaintext sibling read
+PASS  #P2  Plaintext sibling: key_metadata is NULL
+-------------------------------
+Pass: 42
+Fail: 0
